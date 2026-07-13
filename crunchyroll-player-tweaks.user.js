@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.6.0
-// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Einstellungsmenü
+// @version      0.7.0
+// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
 // @match        https://crunchyroll.com/*
@@ -25,6 +25,7 @@
     doubleClickFullscreen: true,
     showBadge: true,
     playbackRate: 1.0,
+    keepPlayerOpen: true,
   };
   const STORAGE_KEY = 'crTweaksSettings';
 
@@ -146,6 +147,7 @@
         ['skipIntro', 'Intro automatisch überspringen'],
         ['skipOutro', 'Outro automatisch überspringen'],
         ['doubleClickFullscreen', 'Doppelklick = Vollbild'],
+        ['keepPlayerOpen', 'Player offen halten (Anti-Idle)'],
       ];
       for (const [key, label] of options) {
         const row = document.createElement('label');
@@ -227,7 +229,11 @@
     if (Date.now() >= flashUntil) refreshBadgeText();
   }
 
-  document.addEventListener('mousemove', () => { lastMouseMove = Date.now(); }, { passive: true });
+  // Nur echte Mausbewegungen zählen — die simulierten Anti-Idle-Events
+  // (isTrusted=false) sollen das Badge nicht dauerhaft einblenden.
+  document.addEventListener('mousemove', (e) => {
+    if (e.isTrusted) lastMouseMove = Date.now();
+  }, { passive: true });
   document.addEventListener('fullscreenchange', () => {
     if (uiRoot) {
       (document.fullscreenElement || document.body).appendChild(uiRoot);
@@ -379,6 +385,42 @@
   }
 
   // ------------------------------------------------------------------
+  // Player offen halten: Crunchyroll wirft einen nach längerer
+  // Inaktivität zurück auf die Serienseite. Dagegen helfen zwei Dinge:
+  // 1. regelmäßig simulierte Aktivität, damit der Idle-Timer nie abläuft
+  // 2. falls doch ein "Noch da?"-Dialog erscheint, ihn wegklicken
+  // ------------------------------------------------------------------
+  const STILL_WATCHING_QUESTION = /noch da|schaust du noch|siehst du noch|still watching|still there|weiterhin ansehen|inaktivität/i;
+  const CONTINUE_BUTTON = /weiter|fortsetzen|ja\b|continue|yes\b|keep watching|resume|bleiben/i;
+
+  function simulateActivity() {
+    // Leicht wandernde Koordinaten, damit es nicht wie ein statischer
+    // Wiederholungs-Event aussieht.
+    const x = 200 + Math.floor(Math.random() * 40);
+    const y = 200 + Math.floor(Math.random() * 40);
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y };
+    document.dispatchEvent(new PointerEvent('pointermove', opts));
+    document.dispatchEvent(new MouseEvent('mousemove', opts));
+    console.debug('[CR Tweaks] Anti-Idle-Ping');
+  }
+
+  function dismissStillWatchingDialog() {
+    for (const dialog of document.querySelectorAll('[role="dialog"], [role="alertdialog"], [class*="modal" i]')) {
+      if (dialog.closest('#cr-tweaks-ui')) continue;
+      if (!STILL_WATCHING_QUESTION.test(dialog.textContent || '')) continue;
+      for (const btn of dialog.querySelectorAll('button, [role="button"]')) {
+        const label = `${btn.textContent || ''} ${btn.getAttribute('aria-label') || ''}`;
+        if (CONTINUE_BUTTON.test(label)) {
+          simulateClick(findClickTarget(btn));
+          console.info(`[CR Tweaks] "Noch da?"-Dialog weggeklickt über ${describe(btn)}`);
+          flashBadge('▶ Player offen gehalten', 2500);
+          return;
+        }
+      }
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Doppelklick = Player-Vollbild (klickt den echten Vollbild-Button
   // des Players, kein Browser-Vollbild)
   // ------------------------------------------------------------------
@@ -416,8 +458,10 @@
   // Hauptschleife
   // ------------------------------------------------------------------
   let announced = false;
+  let tick = 0;
 
   setInterval(() => {
+    tick++;
     if (location.href !== lastHref) {
       lastHref = location.href;
       skipEvents = null;
@@ -433,6 +477,11 @@
     timeBasedSkip();
     buttonFallbackSkip();
     enforcePlaybackRate();
+    if (SETTINGS.keepPlayerOpen && document.querySelector('video')) {
+      // alle ~60 s Aktivität vortäuschen, alle ~5 s nach Dialog schauen
+      if (tick % 200 === 0) simulateActivity();
+      if (tick % 16 === 0) dismissStillWatchingDialog();
+    }
     updateBadgeVisibility();
   }, SCAN_INTERVAL_MS);
 })();
