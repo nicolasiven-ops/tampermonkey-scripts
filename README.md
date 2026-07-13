@@ -14,4 +14,4 @@ Updates: Wenn im Script-Header eine `@updateURL`/`@downloadURL` auf die Raw-Date
 
 | Script | Beschreibung |
 | --- | --- |
-| _folgt_ | _folgt_ |
+| [crunchyroll-player-tweaks.user.js](https://raw.githubusercontent.com/nicolasiven-ops/tampermonkey-scripts/main/crunchyroll-player-tweaks.user.js) | Auto-Skip für Intro & Outro im Crunchyroll-Player |
