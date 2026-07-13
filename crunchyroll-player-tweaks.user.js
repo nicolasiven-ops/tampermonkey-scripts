@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.7.0
+// @version      0.8.0
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -421,6 +421,100 @@
   }
 
   // ------------------------------------------------------------------
+  // Rauswurf-Schutz: Crunchyroll navigiert nach langer Pause von der
+  // Watch-Seite zurück zur Serienseite. Drei Verteidigungslinien:
+  // 1. Programmatische SPA-Navigation weg von /watch/ blockieren,
+  //    wenn kurz zuvor KEINE echte Nutzereingabe stattfand.
+  // 2. Rutscht doch eine Navigation durch, sofort zur Folge zurück.
+  // 3. Position laufend speichern und nach Rücksprung dort fortsetzen.
+  // ------------------------------------------------------------------
+  const RESUME_KEY = 'crTweaksResume';
+  const USER_INTENT_WINDOW_MS = 10000; // so lange gilt eine Eingabe als "der Nutzer wollte das"
+  const BOUNCE_COOLDOWN_MS = 120000;
+
+  let lastTrustedInteraction = 0;
+  let lastBounceAt = 0;
+  let restoreDone = false;
+
+  for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    document.addEventListener(type, (e) => {
+      if (e.isTrusted) lastTrustedInteraction = Date.now();
+    }, { capture: true, passive: true });
+  }
+
+  function isWatchUrl(url) {
+    try { return new URL(url, location.href).pathname.includes('/watch/'); } catch (e) { return false; }
+  }
+
+  function userRecentlyActive() {
+    return Date.now() - lastTrustedInteraction < USER_INTENT_WINDOW_MS;
+  }
+
+  // Linie 1: pushState/replaceState weg von /watch/ ohne Nutzereingabe blocken
+  function guardHistory(method) {
+    const orig = history[method];
+    history[method] = function (state, title, url) {
+      try {
+        if (url != null && SETTINGS.keepPlayerOpen && isWatchUrl(location.href) && !isWatchUrl(url) && !userRecentlyActive()) {
+          console.info(`[CR Tweaks] Automatische Navigation blockiert (${method} → ${url})`);
+          flashBadge('⛔ Rauswurf blockiert', 3000);
+          return undefined;
+        }
+      } catch (e) { /* im Zweifel durchlassen */ }
+      return orig.apply(this, arguments);
+    };
+  }
+  guardHistory('pushState');
+  guardHistory('replaceState');
+
+  function saveResumePoint(video) {
+    try {
+      localStorage.setItem(RESUME_KEY, JSON.stringify({
+        url: location.href,
+        time: video.currentTime,
+        at: Date.now(),
+      }));
+    } catch (e) { /* egal */ }
+  }
+
+  function loadResumePoint() {
+    try { return JSON.parse(localStorage.getItem(RESUME_KEY) || 'null'); } catch (e) { return null; }
+  }
+
+  // Linie 2: durchgerutschte Navigation → zurück zur Folge
+  function handleNavigation(fromUrl) {
+    if (!SETTINGS.keepPlayerOpen) return;
+    if (!isWatchUrl(fromUrl) || isWatchUrl(location.href)) return;
+    if (userRecentlyActive()) return; // Nutzer hat selbst navigiert
+    if (Date.now() - lastBounceAt < BOUNCE_COOLDOWN_MS) return;
+    const resume = loadResumePoint();
+    if (!resume || Date.now() - resume.at > 60000) return;
+    lastBounceAt = Date.now();
+    console.info(`[CR Tweaks] Rauswurf erkannt — zurück zu ${resume.url} bei ${Math.round(resume.time)}s`);
+    location.assign(resume.url);
+  }
+
+  // Linie 3: nach (Rück-)Laden der Watch-Seite an gespeicherter Stelle fortsetzen
+  function restoreResumePoint() {
+    if (restoreDone) return;
+    const video = mainVideo();
+    if (!video || video.readyState < 2 || !video.duration) return;
+    restoreDone = true;
+    const resume = loadResumePoint();
+    if (!resume || Date.now() - resume.at > 600000) return;
+    try {
+      if (new URL(resume.url).pathname !== location.pathname) return;
+    } catch (e) { return; }
+    if (resume.time > video.currentTime + 5 && resume.time < video.duration - 5) {
+      video.currentTime = resume.time;
+      const min = Math.floor(resume.time / 60);
+      const sec = String(Math.floor(resume.time % 60)).padStart(2, '0');
+      console.info(`[CR Tweaks] Position wiederhergestellt: ${min}:${sec}`);
+      flashBadge(`▶ Fortgesetzt bei ${min}:${sec}`, 3000);
+    }
+  }
+
+  // ------------------------------------------------------------------
   // Doppelklick = Player-Vollbild (klickt den echten Vollbild-Button
   // des Players, kein Browser-Vollbild)
   // ------------------------------------------------------------------
@@ -463,9 +557,11 @@
   setInterval(() => {
     tick++;
     if (location.href !== lastHref) {
+      const fromUrl = lastHref;
       lastHref = location.href;
       skipEvents = null;
       console.info('[CR Tweaks] Navigation erkannt — Skip-Daten zurückgesetzt');
+      handleNavigation(fromUrl);
     }
     buildUi();
     if (!announced && document.querySelector('video')) {
@@ -481,6 +577,12 @@
       // alle ~60 s Aktivität vortäuschen, alle ~5 s nach Dialog schauen
       if (tick % 200 === 0) simulateActivity();
       if (tick % 16 === 0) dismissStillWatchingDialog();
+      // Position regelmäßig sichern, solange wir auf einer Watch-Seite sind
+      if (tick % 16 === 8 && isWatchUrl(location.href)) {
+        const video = mainVideo();
+        if (video && video.currentTime > 0) saveResumePoint(video);
+      }
+      restoreResumePoint();
     }
     updateBadgeVisibility();
   }, SCAN_INTERVAL_MS);
