@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.8.0
+// @version      0.9.0
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -45,7 +45,28 @@
   const CLICK_COOLDOWN_MS = 5000;
   const BADGE_IDLE_MS = 3000;
 
-  console.info(`[CR Tweaks] geladen in ${location.href}`);
+  // ------------------------------------------------------------------
+  // Diagnose-Log: die letzten 120 Ereignisse überleben Reloads
+  // (localStorage) und lassen sich über das Menü kopieren.
+  // ------------------------------------------------------------------
+  const LOG_KEY = 'crTweaksLog';
+
+  function log(msg) {
+    console.info(`[CR Tweaks] ${msg}`);
+    try {
+      const entries = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+      entries.push(`${new Date().toLocaleTimeString('de-DE')} ${msg}`);
+      localStorage.setItem(LOG_KEY, JSON.stringify(entries.slice(-120)));
+    } catch (e) { /* egal */ }
+  }
+
+  function readLog() {
+    try { return JSON.parse(localStorage.getItem(LOG_KEY) || '[]').join('\n'); } catch (e) { return ''; }
+  }
+
+  log(`geladen in ${location.href} (Referrer: ${document.referrer || '—'})`);
+  window.addEventListener('beforeunload', () => log(`Seite wird entladen: ${location.href}`));
+  document.addEventListener('visibilitychange', () => log(`Tab ${document.visibilityState === 'hidden' ? 'in den Hintergrund' : 'in den Vordergrund'}`));
 
   // ------------------------------------------------------------------
   // Skip-Daten abfangen: Der Player lädt pro Folge eine skip-events-JSON
@@ -66,7 +87,7 @@
     }
     skipEvents = found;
     const parts = Object.entries(found).map(([k, s]) => `${k} ${Math.round(s.start)}–${Math.round(s.end)}s`);
-    console.info(`[CR Tweaks] Skip-Daten empfangen: ${parts.join(', ') || 'keine Segmente'}`);
+    log(`Skip-Daten empfangen: ${parts.join(', ') || 'keine Segmente'}`);
   }
 
   function sniffUrl(url, readBody) {
@@ -188,6 +209,23 @@
       speedRow.appendChild(makeSpeedButton('+', +0.1));
       panelEl.appendChild(speedRow);
 
+      // Diagnose-Log kopieren (für Fehlersuche)
+      const diagButton = document.createElement('button');
+      diagButton.textContent = 'Diagnose-Log kopieren';
+      diagButton.style.cssText = 'margin-top:8px;border:none;border-radius:4px;background:#3a3a42;color:#fff;cursor:pointer;font:600 11px/1 sans-serif;padding:6px 9px';
+      diagButton.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const text = readLog() || '(Log ist leer)';
+        navigator.clipboard.writeText(text).then(
+          () => flashBadge('📋 Log kopiert', 2000),
+          () => {
+            console.info(`[CR Tweaks] Log:\n${text}`);
+            flashBadge('Log in Konsole ausgegeben (F12)', 2500);
+          }
+        );
+      });
+      panelEl.appendChild(diagButton);
+
       uiRoot.appendChild(badgeEl);
       uiRoot.appendChild(panelEl);
 
@@ -220,7 +258,9 @@
 
   function updateBadgeVisibility() {
     if (!badgeEl) return;
-    if (!SETTINGS.showBadge || !document.querySelector('video')) {
+    // Badge auf allen CR-Seiten zeigen (nicht nur mit Video), damit das
+    // Menü samt Diagnose-Log auch nach einem Rauswurf erreichbar ist.
+    if (!SETTINGS.showBadge) {
       badgeEl.style.opacity = '0';
       return;
     }
@@ -295,7 +335,7 @@
       if (seg && t >= seg.start && t < seg.end - 0.5) {
         video.currentTime = Math.min(seg.end, video.duration);
         const name = category === 'intro' ? 'Intro' : 'Outro';
-        console.info(`[CR Tweaks] ${name} übersprungen (${Math.round(t)}s → ${Math.round(seg.end)}s)`);
+        log(`${name} übersprungen (${Math.round(t)}s → ${Math.round(seg.end)}s)`);
         flashBadge(`⏭ ${name} übersprungen`, 2500);
       }
     }
@@ -412,7 +452,7 @@
         const label = `${btn.textContent || ''} ${btn.getAttribute('aria-label') || ''}`;
         if (CONTINUE_BUTTON.test(label)) {
           simulateClick(findClickTarget(btn));
-          console.info(`[CR Tweaks] "Noch da?"-Dialog weggeklickt über ${describe(btn)}`);
+          log(`"Noch da?"-Dialog weggeklickt über ${describe(btn)}`);
           flashBadge('▶ Player offen gehalten', 2500);
           return;
         }
@@ -433,8 +473,15 @@
   const BOUNCE_COOLDOWN_MS = 120000;
 
   let lastTrustedInteraction = 0;
-  let lastBounceAt = 0;
   let restoreDone = false;
+
+  // Bounce-Sperre in sessionStorage, damit sie den Reload überlebt
+  function canBounce() {
+    try { return Date.now() - (parseInt(sessionStorage.getItem('crTweaksBounceAt') || '0', 10)) > BOUNCE_COOLDOWN_MS; } catch (e) { return false; }
+  }
+  function markBounce() {
+    try { sessionStorage.setItem('crTweaksBounceAt', String(Date.now())); } catch (e) { /* egal */ }
+  }
 
   for (const type of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
     document.addEventListener(type, (e) => {
@@ -456,7 +503,7 @@
     history[method] = function (state, title, url) {
       try {
         if (url != null && SETTINGS.keepPlayerOpen && isWatchUrl(location.href) && !isWatchUrl(url) && !userRecentlyActive()) {
-          console.info(`[CR Tweaks] Automatische Navigation blockiert (${method} → ${url})`);
+          log(`Automatische Navigation blockiert (${method} → ${url})`);
           flashBadge('⛔ Rauswurf blockiert', 3000);
           return undefined;
         }
@@ -473,6 +520,7 @@
         url: location.href,
         time: video.currentTime,
         at: Date.now(),
+        lastInput: lastTrustedInteraction,
       }));
     } catch (e) { /* egal */ }
   }
@@ -486,13 +534,31 @@
     if (!SETTINGS.keepPlayerOpen) return;
     if (!isWatchUrl(fromUrl) || isWatchUrl(location.href)) return;
     if (userRecentlyActive()) return; // Nutzer hat selbst navigiert
-    if (Date.now() - lastBounceAt < BOUNCE_COOLDOWN_MS) return;
+    if (!canBounce()) return;
     const resume = loadResumePoint();
     if (!resume || Date.now() - resume.at > 60000) return;
-    lastBounceAt = Date.now();
-    console.info(`[CR Tweaks] Rauswurf erkannt — zurück zu ${resume.url} bei ${Math.round(resume.time)}s`);
+    markBounce();
+    log(`Rauswurf erkannt (SPA) — zurück zu ${resume.url} bei ${Math.round(resume.time)}s`);
     location.assign(resume.url);
   }
+
+  // Linie 2b: Rauswurf per komplettem Seiten-Reload. Den sieht der
+  // pushState-Wächter nicht — erkennbar aber daran, dass wir frisch auf
+  // einer Nicht-Watch-Seite landen, der Referrer die Watch-Seite ist,
+  // Sekunden zuvor noch geschaut wurde und der Nutzer nichts gedrückt hat.
+  function bounceAfterReloadKick() {
+    if (!SETTINGS.keepPlayerOpen) return;
+    if (isWatchUrl(location.href)) return;
+    const resume = loadResumePoint();
+    if (!resume || Date.now() - resume.at > 120000) return;
+    if (!document.referrer || !isWatchUrl(document.referrer)) return;
+    if (resume.lastInput && resume.at - resume.lastInput < USER_INTENT_WINDOW_MS) return;
+    if (!canBounce()) return;
+    markBounce();
+    log(`Rauswurf erkannt (Reload) — zurück zu ${resume.url} bei ${Math.round(resume.time)}s`);
+    location.assign(resume.url);
+  }
+  bounceAfterReloadKick();
 
   // Linie 3: nach (Rück-)Laden der Watch-Seite an gespeicherter Stelle fortsetzen
   function restoreResumePoint() {
@@ -509,7 +575,7 @@
       video.currentTime = resume.time;
       const min = Math.floor(resume.time / 60);
       const sec = String(Math.floor(resume.time % 60)).padStart(2, '0');
-      console.info(`[CR Tweaks] Position wiederhergestellt: ${min}:${sec}`);
+      log(`Position wiederhergestellt: ${min}:${sec}`);
       flashBadge(`▶ Fortgesetzt bei ${min}:${sec}`, 3000);
     }
   }
@@ -552,6 +618,7 @@
   // Hauptschleife
   // ------------------------------------------------------------------
   let announced = false;
+  let videoPresent = false;
   let tick = 0;
 
   setInterval(() => {
@@ -560,15 +627,21 @@
       const fromUrl = lastHref;
       lastHref = location.href;
       skipEvents = null;
-      console.info('[CR Tweaks] Navigation erkannt — Skip-Daten zurückgesetzt');
+      log(`Navigation: ${fromUrl} → ${location.href}`);
       handleNavigation(fromUrl);
     }
     buildUi();
-    if (!announced && document.querySelector('video')) {
+    // Verschwindet das Video, ohne dass sich die URL ändert, ist das die
+    // heiße Spur für den Rauswurf-Mechanismus — unbedingt festhalten.
+    const videoNow = !!document.querySelector('video');
+    if (videoNow !== videoPresent) {
+      videoPresent = videoNow;
+      log(videoNow ? `Video-Element da (${location.href})` : `Video-Element VERSCHWUNDEN, URL: ${location.href}`);
+    }
+    if (!announced && videoNow) {
       announced = true;
       lastMouseMove = Date.now();
       flashBadge('✓ CR Tweaks aktiv — Klick aufs Badge für Einstellungen', 4000);
-      console.info('[CR Tweaks] Player erkannt — Features aktiv');
     }
     timeBasedSkip();
     buttonFallbackSkip();
