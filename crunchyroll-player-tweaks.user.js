@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.10.0
-// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro & Recap, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
+// @version      0.11.0
+// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro, Recap & Preview, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
 // @match        https://crunchyroll.com/*
@@ -23,6 +23,7 @@
     skipIntro: true,
     skipOutro: true,
     skipRecap: true,
+    skipPreview: true,
     doubleClickFullscreen: true,
     showBadge: true,
     playbackRate: 1.0,
@@ -169,6 +170,7 @@
         ['skipIntro', 'Intro automatisch überspringen'],
         ['skipOutro', 'Outro automatisch überspringen'],
         ['skipRecap', 'Rückblick (Recap) überspringen'],
+        ['skipPreview', 'Vorschau (Preview) überspringen'],
         ['doubleClickFullscreen', 'Doppelklick = Vollbild'],
         ['keepPlayerOpen', 'Player offen halten (Anti-Idle)'],
       ];
@@ -247,7 +249,7 @@
 
   function refreshBadgeText() {
     if (!badgeEl || Date.now() < flashUntil) return;
-    const skipOn = SETTINGS.skipIntro || SETTINGS.skipOutro || SETTINGS.skipRecap;
+    const skipOn = SETTINGS.skipIntro || SETTINGS.skipOutro || SETTINGS.skipRecap || SETTINGS.skipPreview;
     const speed = SETTINGS.playbackRate !== 1 ? ` · ${SETTINGS.playbackRate.toFixed(1)}×` : '';
     badgeEl.textContent = `⏭ CR Tweaks · Auto-Skip ${skipOn ? 'an' : 'aus'}${speed} ⚙`;
   }
@@ -322,10 +324,10 @@
     }
   }
 
-  const SKIP_CATEGORIES = ['intro', 'outro', 'recap'];
-  const SEGMENT_BY_CATEGORY = { intro: 'intro', outro: 'credits', recap: 'recap' };
-  const SETTING_BY_CATEGORY = { intro: 'skipIntro', outro: 'skipOutro', recap: 'skipRecap' };
-  const NAME_BY_CATEGORY = { intro: 'Intro', outro: 'Outro', recap: 'Recap' };
+  const SKIP_CATEGORIES = ['intro', 'outro', 'recap', 'preview'];
+  const SEGMENT_BY_CATEGORY = { intro: 'intro', outro: 'credits', recap: 'recap', preview: 'preview' };
+  const SETTING_BY_CATEGORY = { intro: 'skipIntro', outro: 'skipOutro', recap: 'skipRecap', preview: 'skipPreview' };
+  const NAME_BY_CATEGORY = { intro: 'Intro', outro: 'Outro', recap: 'Recap', preview: 'Preview' };
 
   function timeBasedSkip() {
     if (!skipEvents) return;
@@ -353,13 +355,15 @@
     intro: /skip\s*(intro|opening)|(intro|vorspann|opening)\s*überspringen/i,
     outro: /skip\s*(credits|ending|outro)|(abspann|outro|ending|credits)\s*überspringen/i,
     recap: /skip\s*recap|(rückblick|recap|zusammenfassung)\s*überspringen/i,
+    preview: /skip\s*preview|(vorschau|preview)\s*überspringen/i,
   };
   const TESTID_PATTERNS = {
     intro: /skip[-_]?intro/i,
     outro: /skip[-_]?(credits|outro|ending)/i,
     recap: /skip[-_]?recap/i,
+    preview: /skip[-_]?preview/i,
   };
-  const lastClickAt = { intro: 0, outro: 0, recap: 0 };
+  const lastClickAt = { intro: 0, outro: 0, recap: 0, preview: 0 };
 
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
