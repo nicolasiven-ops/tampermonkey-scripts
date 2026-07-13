@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.5.0
-// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Einstellungsmenü
+// @version      0.6.0
+// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
 // @match        https://crunchyroll.com/*
@@ -24,6 +24,7 @@
     skipOutro: true,
     doubleClickFullscreen: true,
     showBadge: true,
+    playbackRate: 1.0,
   };
   const STORAGE_KEY = 'crTweaksSettings';
 
@@ -108,6 +109,7 @@
   let uiRoot = null;
   let badgeEl = null;
   let panelEl = null;
+  let speedValueEl = null;
   let panelOpen = false;
   let flashUntil = 0;
   let lastMouseMove = 0;
@@ -161,6 +163,29 @@
         panelEl.appendChild(row);
       }
 
+      // Tempo-Regler in 0.1er-Schritten
+      const speedRow = document.createElement('div');
+      speedRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin:10px 0 4px;font-weight:400';
+      const speedButtonCss = 'width:26px;height:26px;border:none;border-radius:4px;background:#3a3a42;color:#fff;cursor:pointer;font:700 15px/1 sans-serif;padding:0';
+      const makeSpeedButton = (text, delta) => {
+        const button = document.createElement('button');
+        button.textContent = text;
+        button.style.cssText = speedButtonCss;
+        button.addEventListener('click', (e) => {
+          e.stopPropagation();
+          setPlaybackRate(SETTINGS.playbackRate + delta);
+        });
+        return button;
+      };
+      speedValueEl = document.createElement('span');
+      speedValueEl.style.cssText = 'min-width:38px;text-align:center;font-weight:600';
+      speedValueEl.textContent = SETTINGS.playbackRate.toFixed(1) + '×';
+      speedRow.appendChild(document.createTextNode('Tempo'));
+      speedRow.appendChild(makeSpeedButton('−', -0.1));
+      speedRow.appendChild(speedValueEl);
+      speedRow.appendChild(makeSpeedButton('+', +0.1));
+      panelEl.appendChild(speedRow);
+
       uiRoot.appendChild(badgeEl);
       uiRoot.appendChild(panelEl);
 
@@ -181,7 +206,8 @@
   function refreshBadgeText() {
     if (!badgeEl || Date.now() < flashUntil) return;
     const skipOn = SETTINGS.skipIntro || SETTINGS.skipOutro;
-    badgeEl.textContent = `⏭ CR Tweaks · Auto-Skip ${skipOn ? 'an' : 'aus'} ⚙`;
+    const speed = SETTINGS.playbackRate !== 1 ? ` · ${SETTINGS.playbackRate.toFixed(1)}×` : '';
+    badgeEl.textContent = `⏭ CR Tweaks · Auto-Skip ${skipOn ? 'an' : 'aus'}${speed} ⚙`;
   }
 
   function flashBadge(text, durationMs) {
@@ -221,6 +247,31 @@
       if (area > bestArea) { best = v; bestArea = area; }
     }
     return best;
+  }
+
+  // ------------------------------------------------------------------
+  // Wiedergabetempo: in 0.1er-Schritten einstellbar, wird gespeichert
+  // und bei jeder (neuen) Folge wieder durchgesetzt.
+  // ------------------------------------------------------------------
+  function setPlaybackRate(rate) {
+    rate = Math.round(Math.min(3, Math.max(0.5, rate)) * 10) / 10;
+    SETTINGS.playbackRate = rate;
+    saveSettings();
+    const video = mainVideo();
+    if (video) video.playbackRate = rate;
+    if (speedValueEl) speedValueEl.textContent = rate.toFixed(1) + '×';
+    flashBadge(`⏱ Tempo ${rate.toFixed(1)}×`, 1500);
+    console.info(`[CR Tweaks] Tempo auf ${rate.toFixed(1)}× gesetzt`);
+  }
+
+  function enforcePlaybackRate() {
+    const video = mainVideo();
+    if (!video) return;
+    // Der Player setzt das Tempo bei Folgenwechseln auf 1× zurück —
+    // hier wird das gespeicherte Tempo wieder angelegt.
+    if (Math.abs(video.playbackRate - SETTINGS.playbackRate) > 0.01) {
+      video.playbackRate = SETTINGS.playbackRate;
+    }
   }
 
   const SEGMENT_BY_CATEGORY = { intro: 'intro', outro: 'credits' };
@@ -381,6 +432,7 @@
     }
     timeBasedSkip();
     buttonFallbackSkip();
+    enforcePlaybackRate();
     updateBadgeVisibility();
   }, SCAN_INTERVAL_MS);
 })();
