@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.9.0
-// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
+// @version      0.10.0
+// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro & Recap, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
 // @match        https://crunchyroll.com/*
@@ -22,6 +22,7 @@
   const DEFAULTS = {
     skipIntro: true,
     skipOutro: true,
+    skipRecap: true,
     doubleClickFullscreen: true,
     showBadge: true,
     playbackRate: 1.0,
@@ -167,6 +168,7 @@
       const options = [
         ['skipIntro', 'Intro automatisch überspringen'],
         ['skipOutro', 'Outro automatisch überspringen'],
+        ['skipRecap', 'Rückblick (Recap) überspringen'],
         ['doubleClickFullscreen', 'Doppelklick = Vollbild'],
         ['keepPlayerOpen', 'Player offen halten (Anti-Idle)'],
       ];
@@ -245,7 +247,7 @@
 
   function refreshBadgeText() {
     if (!badgeEl || Date.now() < flashUntil) return;
-    const skipOn = SETTINGS.skipIntro || SETTINGS.skipOutro;
+    const skipOn = SETTINGS.skipIntro || SETTINGS.skipOutro || SETTINGS.skipRecap;
     const speed = SETTINGS.playbackRate !== 1 ? ` · ${SETTINGS.playbackRate.toFixed(1)}×` : '';
     badgeEl.textContent = `⏭ CR Tweaks · Auto-Skip ${skipOn ? 'an' : 'aus'}${speed} ⚙`;
   }
@@ -320,7 +322,10 @@
     }
   }
 
-  const SEGMENT_BY_CATEGORY = { intro: 'intro', outro: 'credits' };
+  const SKIP_CATEGORIES = ['intro', 'outro', 'recap'];
+  const SEGMENT_BY_CATEGORY = { intro: 'intro', outro: 'credits', recap: 'recap' };
+  const SETTING_BY_CATEGORY = { intro: 'skipIntro', outro: 'skipOutro', recap: 'skipRecap' };
+  const NAME_BY_CATEGORY = { intro: 'Intro', outro: 'Outro', recap: 'Recap' };
 
   function timeBasedSkip() {
     if (!skipEvents) return;
@@ -328,13 +333,12 @@
     // Nicht eingreifen, während pausiert oder gescrubbt wird
     if (!video || video.paused || video.seeking || !video.duration) return;
     const t = video.currentTime;
-    for (const category of ['intro', 'outro']) {
-      if (category === 'intro' && !SETTINGS.skipIntro) continue;
-      if (category === 'outro' && !SETTINGS.skipOutro) continue;
+    for (const category of SKIP_CATEGORIES) {
+      if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
       const seg = skipEvents[SEGMENT_BY_CATEGORY[category]];
       if (seg && t >= seg.start && t < seg.end - 0.5) {
         video.currentTime = Math.min(seg.end, video.duration);
-        const name = category === 'intro' ? 'Intro' : 'Outro';
+        const name = NAME_BY_CATEGORY[category];
         log(`${name} übersprungen (${Math.round(t)}s → ${Math.round(seg.end)}s)`);
         flashBadge(`⏭ ${name} übersprungen`, 2500);
       }
@@ -348,12 +352,14 @@
   const PATTERNS = {
     intro: /skip\s*(intro|opening)|(intro|vorspann|opening)\s*überspringen/i,
     outro: /skip\s*(credits|ending|outro)|(abspann|outro|ending|credits)\s*überspringen/i,
+    recap: /skip\s*recap|(rückblick|recap|zusammenfassung)\s*überspringen/i,
   };
   const TESTID_PATTERNS = {
     intro: /skip[-_]?intro/i,
     outro: /skip[-_]?(credits|outro|ending)/i,
+    recap: /skip[-_]?recap/i,
   };
-  const lastClickAt = { intro: 0, outro: 0 };
+  const lastClickAt = { intro: 0, outro: 0, recap: 0 };
 
   function isVisible(el) {
     const rect = el.getBoundingClientRect();
@@ -404,9 +410,8 @@
 
   function buttonFallbackSkip() {
     if (skipEvents) return; // Zeitfenster-Skip ist zuständig
-    for (const category of ['intro', 'outro']) {
-      if (category === 'intro' && !SETTINGS.skipIntro) continue;
-      if (category === 'outro' && !SETTINGS.skipOutro) continue;
+    for (const category of SKIP_CATEGORIES) {
+      if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
       if (Date.now() - lastClickAt[category] < CLICK_COOLDOWN_MS) continue;
       const candidates = document.querySelectorAll('button, [role="button"], a, [data-testid]');
       for (const el of candidates) {
