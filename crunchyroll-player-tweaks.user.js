@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.1.0
-// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro
+// @version      0.2.0
+// @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro & Outro, Doppelklick für Vollbild
 // @author       nicolasiven-ops
 // @match        https://www.crunchyroll.com/*
 // @match        https://static.crunchyroll.com/vilos-v2/*
@@ -21,6 +21,7 @@
   const CONFIG = {
     skipIntro: true,
     skipOutro: true,
+    doubleClickFullscreen: true,
     scanIntervalMs: 500, // wie oft nach Skip-Buttons gesucht wird
   };
 
@@ -80,4 +81,37 @@
   }
 
   setInterval(scan, CONFIG.scanIntervalMs);
+
+  // ------------------------------------------------------------------
+  // Doppelklick auf das Video = Vollbild an/aus (wie bei YouTube)
+  // ------------------------------------------------------------------
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+      return;
+    }
+    // Das ganze iframe-Dokument in den Vollbildmodus heben — das ist
+    // exakt der Player und entspricht dem, was der native Button tut.
+    const root = document.documentElement;
+    const request = root.requestFullscreen || root.webkitRequestFullscreen;
+    if (request) {
+      const result = request.call(root);
+      if (result && result.catch) result.catch(() => {});
+    }
+  }
+
+  if (CONFIG.doubleClickFullscreen) {
+    document.addEventListener(
+      'dblclick',
+      (e) => {
+        // Nur im Player-iframe aktiv (nur dort existiert ein <video>).
+        if (!document.querySelector('video')) return;
+        // Doppelklicks auf Bedienelemente (Buttons, Seekbar, Menüs)
+        // nicht als Vollbild-Wunsch werten.
+        if (e.target.closest('button, [role="button"], a, input, [role="slider"], [role="menu"]')) return;
+        toggleFullscreen();
+      },
+      true
+    );
+  }
 })();
