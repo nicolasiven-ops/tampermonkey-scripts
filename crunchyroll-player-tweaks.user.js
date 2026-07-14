@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.11.0
+// @version      0.12.0
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro, Recap & Preview, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -77,6 +77,9 @@
   // unabhängig davon, ob/wo der Player einen Skip-Button rendert.
   // ------------------------------------------------------------------
   let skipEvents = null; // { intro: {start, end}, credits: {start, end}, ... }
+  // Pro Folge wird jedes Segment nur EINMAL automatisch übersprungen —
+  // wer bewusst zurück ins Outro spult, will es offensichtlich sehen.
+  const skippedOnce = new Set();
 
   function handleSkipEventsJson(data) {
     if (!data || typeof data !== 'object') return;
@@ -88,6 +91,7 @@
       }
     }
     skipEvents = found;
+    skippedOnce.clear();
     const parts = Object.entries(found).map(([k, s]) => `${k} ${Math.round(s.start)}–${Math.round(s.end)}s`);
     log(`Skip-Daten empfangen: ${parts.join(', ') || 'keine Segmente'}`);
   }
@@ -337,8 +341,10 @@
     const t = video.currentTime;
     for (const category of SKIP_CATEGORIES) {
       if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
+      if (skippedOnce.has(category)) continue;
       const seg = skipEvents[SEGMENT_BY_CATEGORY[category]];
       if (seg && t >= seg.start && t < seg.end - 0.5) {
+        skippedOnce.add(category);
         video.currentTime = Math.min(seg.end, video.duration);
         const name = NAME_BY_CATEGORY[category];
         log(`${name} übersprungen (${Math.round(t)}s → ${Math.round(seg.end)}s)`);
@@ -530,6 +536,7 @@
         time: video.currentTime,
         at: Date.now(),
         lastInput: lastTrustedInteraction,
+        paused: video.paused,
       }));
     } catch (e) { /* egal */ }
   }
@@ -537,6 +544,11 @@
   function loadResumePoint() {
     try { return JSON.parse(localStorage.getItem(RESUME_KEY) || 'null'); } catch (e) { return null; }
   }
+
+  // Beim Seitenstart einfrieren: die Wiederherstellung soll den Stand
+  // von VOR dem Reload benutzen, nicht einen, den der laufende
+  // Speicherzyklus danach schon wieder überschrieben hat.
+  const RESUME_AT_LOAD = loadResumePoint();
 
   // Linie 2: durchgerutschte Navigation → zurück zur Folge
   function handleNavigation(fromUrl) {
@@ -575,7 +587,7 @@
     const video = mainVideo();
     if (!video || video.readyState < 2 || !video.duration) return;
     restoreDone = true;
-    const resume = loadResumePoint();
+    const resume = RESUME_AT_LOAD;
     if (!resume || Date.now() - resume.at > 600000) return;
     try {
       if (new URL(resume.url).pathname !== location.pathname) return;
@@ -587,6 +599,26 @@
       log(`Position wiederhergestellt: ${min}:${sec}`);
       flashBadge(`▶ Fortgesetzt bei ${min}:${sec}`, 3000);
     }
+    // War vor dem Rauswurf/Reload pausiert? Dann nicht heimlich
+    // weiterspielen, sondern den Zustand wiederherstellen.
+    if (resume.paused && !video.paused) {
+      video.pause();
+      log('Pause-Zustand wiederhergestellt');
+    }
+  }
+
+  // Linie 2c: Crunchyroll baut den Player auch dann ab, wenn die
+  // Navigation blockiert wurde — das Video-Element verschwindet, die
+  // URL bleibt /watch/. Gegenmittel: Folge neu laden (URL stimmt ja
+  // noch) und danach Position + Pausenzustand wiederherstellen.
+  function reloadAfterTeardown() {
+    if (!SETTINGS.keepPlayerOpen || !isWatchUrl(location.href)) return;
+    if (userRecentlyActive() || !canBounce()) return;
+    const resume = loadResumePoint();
+    if (!resume || Date.now() - resume.at > 120000) return;
+    markBounce();
+    log('Player wurde ohne Navigation abgebaut — Folge wird neu geladen');
+    location.reload();
   }
 
   // ------------------------------------------------------------------
@@ -628,6 +660,7 @@
   // ------------------------------------------------------------------
   let announced = false;
   let videoPresent = false;
+  let videoGoneSince = 0;
   let tick = 0;
 
   setInterval(() => {
@@ -645,7 +678,13 @@
     const videoNow = !!document.querySelector('video');
     if (videoNow !== videoPresent) {
       videoPresent = videoNow;
+      videoGoneSince = videoNow ? 0 : Date.now();
       log(videoNow ? `Video-Element da (${location.href})` : `Video-Element VERSCHWUNDEN, URL: ${location.href}`);
+    }
+    // 5 s Karenz, damit kurze Umbauten (Folgenwechsel) nicht als
+    // Rauswurf gewertet werden — der echte Abbau ist dauerhaft.
+    if (!videoNow && announced && videoGoneSince && Date.now() - videoGoneSince > 5000) {
+      reloadAfterTeardown();
     }
     if (!announced && videoNow) {
       announced = true;
