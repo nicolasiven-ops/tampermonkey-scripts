@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.12.0
+// @version      0.12.1
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro, Recap & Preview, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -139,12 +139,13 @@
   let panelEl = null;
   let speedValueEl = null;
   let panelOpen = false;
+  let uiHover = false;
   let flashUntil = 0;
   let lastMouseMove = 0;
 
   const UI_CSS = {
-    root: 'position:fixed;top:76px;right:16px;z-index:2147483647;font:600 12px/1.4 sans-serif;color:#fff;text-align:left',
-    badge: 'padding:5px 11px;border-radius:6px;background:rgba(20,20,24,0.8);border-left:3px solid #f47521;cursor:pointer;user-select:none;letter-spacing:0.2px;transition:opacity 0.35s',
+    root: 'position:fixed;top:76px;right:16px;z-index:2147483647;font:600 12px/1.4 sans-serif;color:#fff;text-align:left;opacity:0;pointer-events:none;transition:opacity 0.35s',
+    badge: 'padding:5px 11px;border-radius:6px;background:rgba(20,20,24,0.8);border-left:3px solid #f47521;cursor:pointer;user-select:none;letter-spacing:0.2px',
     panel: 'margin-top:6px;padding:10px 12px;border-radius:6px;background:rgba(20,20,24,0.92);border-left:3px solid #f47521;display:none;min-width:200px',
     row: 'display:flex;align-items:center;gap:8px;margin:6px 0;cursor:pointer;font-weight:400',
   };
@@ -157,9 +158,12 @@
       uiRoot.id = 'cr-tweaks-ui';
       uiRoot.style.cssText = UI_CSS.root;
 
+      // Solange der Mauszeiger über Badge/Menü steht, nicht ausblenden
+      uiRoot.addEventListener('mouseenter', () => { uiHover = true; });
+      uiRoot.addEventListener('mouseleave', () => { uiHover = false; });
+
       badgeEl = document.createElement('div');
       badgeEl.style.cssText = UI_CSS.badge;
-      badgeEl.style.opacity = '0';
       badgeEl.addEventListener('click', (e) => {
         e.stopPropagation();
         panelOpen = !panelOpen;
@@ -265,15 +269,17 @@
   }
 
   function updateBadgeVisibility() {
-    if (!badgeEl) return;
-    // Badge auf allen CR-Seiten zeigen (nicht nur mit Video), damit das
-    // Menü samt Diagnose-Log auch nach einem Rauswurf erreichbar ist.
-    if (!SETTINGS.showBadge) {
-      badgeEl.style.opacity = '0';
-      return;
+    if (!uiRoot) return;
+    // Badge und Menü blenden gemeinsam aus, sobald die Maus ruht —
+    // außer der Zeiger steht gerade darüber (uiHover).
+    const active = SETTINGS.showBadge
+      && (uiHover || Date.now() < flashUntil || Date.now() - lastMouseMove < BADGE_IDLE_MS);
+    uiRoot.style.opacity = active ? '1' : '0';
+    uiRoot.style.pointerEvents = active ? 'auto' : 'none';
+    if (!active && panelOpen) {
+      panelOpen = false;
+      panelEl.style.display = 'none';
     }
-    const active = panelOpen || Date.now() < flashUntil || Date.now() - lastMouseMove < BADGE_IDLE_MS;
-    badgeEl.style.opacity = active ? '1' : '0';
     if (Date.now() >= flashUntil) refreshBadgeText();
   }
 
