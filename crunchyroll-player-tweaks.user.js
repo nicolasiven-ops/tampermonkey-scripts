@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.12.1
+// @version      0.13.0
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro, Recap & Preview, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -28,6 +28,7 @@
     showBadge: true,
     playbackRate: 1.0,
     keepPlayerOpen: true,
+    skipDelaySec: 3, // so viele Sekunden läuft ein Segment, bevor geskippt wird
   };
   const STORAGE_KEY = 'crTweaksSettings';
 
@@ -221,6 +222,31 @@
       speedRow.appendChild(makeSpeedButton('+', +0.1));
       panelEl.appendChild(speedRow);
 
+      // Slider: wie viele Sekunden ein Segment anläuft, bevor geskippt wird
+      const delayRow = document.createElement('div');
+      delayRow.style.cssText = 'display:flex;flex-direction:column;gap:4px;margin:10px 0 4px;font-weight:400';
+      const delayLabel = document.createElement('span');
+      const updateDelayLabel = () => {
+        delayLabel.textContent = `Skip-Verzögerung: ${SETTINGS.skipDelaySec.toFixed(1)} s`;
+      };
+      updateDelayLabel();
+      const delaySlider = document.createElement('input');
+      delaySlider.type = 'range';
+      delaySlider.min = '0';
+      delaySlider.max = '10';
+      delaySlider.step = '0.5';
+      delaySlider.value = String(SETTINGS.skipDelaySec);
+      delaySlider.style.cssText = 'width:100%;accent-color:#f47521;cursor:pointer';
+      delaySlider.addEventListener('click', (e) => e.stopPropagation());
+      delaySlider.addEventListener('input', () => {
+        SETTINGS.skipDelaySec = parseFloat(delaySlider.value) || 0;
+        saveSettings();
+        updateDelayLabel();
+      });
+      delayRow.appendChild(delayLabel);
+      delayRow.appendChild(delaySlider);
+      panelEl.appendChild(delayRow);
+
       // Diagnose-Log kopieren (für Fehlersuche)
       const diagButton = document.createElement('button');
       diagButton.textContent = 'Diagnose-Log kopieren';
@@ -349,7 +375,8 @@
       if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
       if (skippedOnce.has(category)) continue;
       const seg = skipEvents[SEGMENT_BY_CATEGORY[category]];
-      if (seg && t >= seg.start && t < seg.end - 0.5) {
+      // Verzögert skippen: oft läuft am Segmentanfang noch Dialog weiter
+      if (seg && t >= seg.start + SETTINGS.skipDelaySec && t < seg.end - 0.5) {
         skippedOnce.add(category);
         video.currentTime = Math.min(seg.end, video.duration);
         const name = NAME_BY_CATEGORY[category];
@@ -424,24 +451,40 @@
     return `<${el.tagName.toLowerCase()}${testid ? ` data-testid="${testid}"` : ''}${label ? ` aria-label="${label}"` : ''}> "${text}"`;
   }
 
+  const buttonSeenAt = { intro: 0, outro: 0, recap: 0, preview: 0 };
+
   function buttonFallbackSkip() {
     if (skipEvents) return; // Zeitfenster-Skip ist zuständig
     for (const category of SKIP_CATEGORIES) {
       if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
       if (Date.now() - lastClickAt[category] < CLICK_COOLDOWN_MS) continue;
+      let found = null;
       const candidates = document.querySelectorAll('button, [role="button"], a, [data-testid]');
       for (const el of candidates) {
         if (el.closest('#cr-tweaks-ui')) continue;
         if (!matchesCategory(el, category)) continue;
         const target = findClickTarget(el);
         if (!isVisible(target)) continue;
-        lastClickAt[category] = Date.now();
-        simulateClick(target);
-        const name = category === 'intro' ? 'Intro' : 'Outro';
-        console.info(`[CR Tweaks] ${name}-Skip (Fallback): Treffer ${describe(el)} → geklickt ${describe(target)}`);
-        flashBadge(`⏭ ${name} übersprungen`, 2500);
+        found = { el, target };
         break;
       }
+      if (!found) {
+        buttonSeenAt[category] = 0;
+        continue;
+      }
+      // Auch hier verzögert klicken — der Button erscheint zum
+      // Segmentanfang, in den oft noch Dialog hineinläuft.
+      if (!buttonSeenAt[category]) {
+        buttonSeenAt[category] = Date.now();
+        continue;
+      }
+      if (Date.now() - buttonSeenAt[category] < SETTINGS.skipDelaySec * 1000) continue;
+      buttonSeenAt[category] = 0;
+      lastClickAt[category] = Date.now();
+      simulateClick(found.target);
+      const name = NAME_BY_CATEGORY[category];
+      log(`${name}-Skip (Fallback): Treffer ${describe(found.el)} → geklickt ${describe(found.target)}`);
+      flashBadge(`⏭ ${name} übersprungen`, 2500);
     }
   }
 
