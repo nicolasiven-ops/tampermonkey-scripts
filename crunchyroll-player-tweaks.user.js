@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crunchyroll Player Tweaks
 // @namespace    https://github.com/nicolasiven-ops/tampermonkey-scripts
-// @version      0.13.0
+// @version      0.14.0
 // @description  Peppt den Crunchyroll-Player auf: Auto-Skip für Intro, Outro, Recap & Preview, Doppelklick für Vollbild, Wiedergabetempo, Player offen halten, Einstellungsmenü
 // @author       nicolasiven-ops
 // @match        https://*.crunchyroll.com/*
@@ -101,16 +101,37 @@
     if (typeof url === 'string' && url.includes('skip-events')) readBody();
   }
 
+  // Nebenbei den Authorization-Header der Seite mitlesen — damit können
+  // wir selbst Crunchyroll-API-Anfragen stellen (vorherige Episode).
+  let lastAuthHeader = null;
+
+  function captureAuth(headers) {
+    try {
+      if (!headers) return;
+      const value = headers instanceof Headers
+        ? headers.get('authorization')
+        : (headers.Authorization || headers.authorization);
+      if (value && /^Bearer /.test(value)) lastAuthHeader = value;
+    } catch (e) { /* egal */ }
+  }
+
   const origFetch = window.fetch;
   window.fetch = function (...args) {
     const promise = origFetch.apply(this, args);
     try {
       const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+      captureAuth((args[1] && args[1].headers) || (args[0] && args[0].headers));
       sniffUrl(url, () => {
         promise.then((res) => res.clone().json()).then(handleSkipEventsJson).catch(() => {});
       });
     } catch (e) { /* Player nicht stören */ }
     return promise;
+  };
+
+  const origSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+  XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+    if (/^authorization$/i.test(name) && /^Bearer /.test(value)) lastAuthHeader = value;
+    return origSetHeader.call(this, name, value);
   };
 
   const origOpen = XMLHttpRequest.prototype.open;
@@ -139,6 +160,8 @@
   let badgeEl = null;
   let panelEl = null;
   let speedValueEl = null;
+  let bookmarkListEl = null;
+  let undoBtn = null;
   let panelOpen = false;
   let uiHover = false;
   let flashUntil = 0;
@@ -169,6 +192,7 @@
         e.stopPropagation();
         panelOpen = !panelOpen;
         panelEl.style.display = panelOpen ? 'block' : 'none';
+        if (panelOpen) renderBookmarks();
       });
 
       panelEl = document.createElement('div');
@@ -247,6 +271,15 @@
       delayRow.appendChild(delaySlider);
       panelEl.appendChild(delayRow);
 
+      // Bookmark-Liste
+      const bmHeader = document.createElement('div');
+      bmHeader.textContent = 'Bookmarks';
+      bmHeader.style.cssText = 'margin:10px 0 2px;font-weight:600';
+      bookmarkListEl = document.createElement('div');
+      bookmarkListEl.style.cssText = 'display:flex;flex-direction:column;gap:2px;max-height:180px;overflow-y:auto;font-weight:400';
+      panelEl.appendChild(bmHeader);
+      panelEl.appendChild(bookmarkListEl);
+
       // Diagnose-Log kopieren (für Fehlersuche)
       const diagButton = document.createElement('button');
       diagButton.textContent = 'Diagnose-Log kopieren';
@@ -264,7 +297,27 @@
       });
       panelEl.appendChild(diagButton);
 
-      uiRoot.appendChild(badgeEl);
+      const makeActionButton = (text, title, handler) => {
+        const button = document.createElement('button');
+        button.textContent = text;
+        button.title = title;
+        button.style.cssText = 'border:none;border-radius:6px;background:rgba(20,20,24,0.8);border-left:3px solid #f47521;color:#fff;cursor:pointer;font:600 12px/1 sans-serif;padding:5px 9px';
+        button.addEventListener('click', (e) => { e.stopPropagation(); handler(); });
+        return button;
+      };
+
+      const headerRow = document.createElement('div');
+      headerRow.style.cssText = 'display:flex;gap:6px;align-items:stretch';
+      headerRow.appendChild(badgeEl);
+      headerRow.appendChild(makeActionButton('⏮', 'Vorherige Folge', goPrevEpisode));
+      headerRow.appendChild(makeActionButton('🔖', 'Bookmark: aktuelle Stelle merken', addBookmark));
+
+      undoBtn = makeActionButton('⟲ Skip rückgängig', 'Zurück zur Stelle vor dem Auto-Skip', undoSkip);
+      undoBtn.style.display = 'none';
+      undoBtn.style.marginTop = '6px';
+
+      uiRoot.appendChild(headerRow);
+      uiRoot.appendChild(undoBtn);
       uiRoot.appendChild(panelEl);
 
       // Klick außerhalb schließt das Menü
@@ -298,8 +351,11 @@
     if (!uiRoot) return;
     // Badge und Menü blenden gemeinsam aus, sobald die Maus ruht —
     // außer der Zeiger steht gerade darüber (uiHover).
+    const undoActive = !!(undoInfo && Date.now() < undoInfo.until);
+    if (undoBtn) undoBtn.style.display = undoActive ? 'block' : 'none';
+    if (!undoActive) undoInfo = null;
     const active = SETTINGS.showBadge
-      && (uiHover || Date.now() < flashUntil || Date.now() - lastMouseMove < BADGE_IDLE_MS);
+      && (uiHover || undoActive || Date.now() < flashUntil || Date.now() - lastMouseMove < BADGE_IDLE_MS);
     uiRoot.style.opacity = active ? '1' : '0';
     uiRoot.style.pointerEvents = active ? 'auto' : 'none';
     if (!active && panelOpen) {
@@ -378,6 +434,7 @@
       // Verzögert skippen: oft läuft am Segmentanfang noch Dialog weiter
       if (seg && t >= seg.start + SETTINGS.skipDelaySec && t < seg.end - 0.5) {
         skippedOnce.add(category);
+        undoInfo = { time: t, until: Date.now() + 10000 };
         video.currentTime = Math.min(seg.end, video.duration);
         const name = NAME_BY_CATEGORY[category];
         log(`${name} übersprungen (${Math.round(t)}s → ${Math.round(seg.end)}s)`);
@@ -457,6 +514,7 @@
     if (skipEvents) return; // Zeitfenster-Skip ist zuständig
     for (const category of SKIP_CATEGORIES) {
       if (!SETTINGS[SETTING_BY_CATEGORY[category]]) continue;
+      if (skippedOnce.has(category)) continue;
       if (Date.now() - lastClickAt[category] < CLICK_COOLDOWN_MS) continue;
       let found = null;
       const candidates = document.querySelectorAll('button, [role="button"], a, [data-testid]');
@@ -481,11 +539,186 @@
       if (Date.now() - buttonSeenAt[category] < SETTINGS.skipDelaySec * 1000) continue;
       buttonSeenAt[category] = 0;
       lastClickAt[category] = Date.now();
+      skippedOnce.add(category);
+      const fallbackVideo = mainVideo();
+      undoInfo = { time: fallbackVideo ? fallbackVideo.currentTime : 0, until: Date.now() + 10000 };
       simulateClick(found.target);
       const name = NAME_BY_CATEGORY[category];
       log(`${name}-Skip (Fallback): Treffer ${describe(found.el)} → geklickt ${describe(found.target)}`);
       flashBadge(`⏭ ${name} übersprungen`, 2500);
     }
+  }
+
+  // ------------------------------------------------------------------
+  // Vorherige Episode: primär über den Episoden-Verlauf dieser Sitzung,
+  // sonst über Crunchyrolls previous_episode-API (mit mitgelesenem Token)
+  // ------------------------------------------------------------------
+  const EP_HISTORY_KEY = 'crTweaksEpHistory';
+
+  function fmtTime(t) {
+    const min = Math.floor(t / 60);
+    const sec = String(Math.floor(t % 60)).padStart(2, '0');
+    return `${min}:${sec}`;
+  }
+
+  function pushEpisodeHistory(url) {
+    try {
+      const hist = JSON.parse(sessionStorage.getItem(EP_HISTORY_KEY) || '[]');
+      if (hist[hist.length - 1] !== url) hist.push(url);
+      sessionStorage.setItem(EP_HISTORY_KEY, JSON.stringify(hist.slice(-20)));
+    } catch (e) { /* egal */ }
+  }
+
+  async function goPrevEpisode() {
+    try {
+      const hist = JSON.parse(sessionStorage.getItem(EP_HISTORY_KEY) || '[]');
+      while (hist.length) {
+        const candidate = hist.pop();
+        if (candidate && new URL(candidate).pathname !== location.pathname) {
+          sessionStorage.setItem(EP_HISTORY_KEY, JSON.stringify(hist));
+          log(`Vorherige Folge (Verlauf): ${candidate}`);
+          location.assign(candidate);
+          return;
+        }
+      }
+    } catch (e) { /* weiter mit API */ }
+    const m = location.pathname.match(/\/watch\/([A-Z0-9]+)/i);
+    if (m && lastAuthHeader) {
+      try {
+        const res = await fetch(`/content/v2/discover/previous_episode/${m[1]}`, { headers: { Authorization: lastAuthHeader } });
+        if (res.ok) {
+          const data = await res.json();
+          const item = data && data.data && data.data[0];
+          const id = item && (item.id || (item.panel && item.panel.id));
+          if (id) {
+            log(`Vorherige Folge (API): ${id}`);
+            location.assign(`/watch/${id}`);
+            return;
+          }
+        } else {
+          log(`previous_episode-API antwortete ${res.status}`);
+        }
+      } catch (e) {
+        log('previous_episode-API fehlgeschlagen');
+      }
+    }
+    flashBadge('⏮ Keine vorherige Folge gefunden', 2500);
+  }
+
+  // ------------------------------------------------------------------
+  // Bookmarks: Folge + Zeitstempel merken, Liste im Menü, Klick springt
+  // ------------------------------------------------------------------
+  const BOOKMARKS_KEY = 'crTweaksBookmarks';
+  const JUMP_KEY = 'crTweaksJump';
+
+  function loadBookmarks() {
+    try { return JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || '[]'); } catch (e) { return []; }
+  }
+  function saveBookmarks(list) {
+    try { localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(list.slice(-50))); } catch (e) { /* egal */ }
+  }
+
+  function addBookmark() {
+    const video = mainVideo();
+    if (!video || !isWatchUrl(location.href)) {
+      flashBadge('🔖 Kein Video zum Merken', 2000);
+      return;
+    }
+    const title = (document.title || '').replace(/\s*[-–|]\s*Crunchyroll.*$/i, '').trim() || location.pathname;
+    const list = loadBookmarks();
+    list.push({ url: location.href, title, time: video.currentTime, at: Date.now() });
+    saveBookmarks(list);
+    renderBookmarks();
+    log(`Bookmark gesetzt: ${title} @ ${fmtTime(video.currentTime)}`);
+    flashBadge(`🔖 Gemerkt: ${fmtTime(video.currentTime)}`, 2000);
+  }
+
+  function jumpToBookmark(bm) {
+    try {
+      if (new URL(bm.url).pathname === location.pathname) {
+        const video = mainVideo();
+        if (video) {
+          video.currentTime = bm.time;
+          flashBadge(`🔖 ${fmtTime(bm.time)}`, 2000);
+          return;
+        }
+      }
+    } catch (e) { /* dann eben per Navigation */ }
+    try { localStorage.setItem(JUMP_KEY, JSON.stringify({ url: bm.url, time: bm.time, at: Date.now() })); } catch (e) { /* egal */ }
+    location.assign(bm.url);
+  }
+
+  function renderBookmarks() {
+    if (!bookmarkListEl) return;
+    bookmarkListEl.textContent = '';
+    const list = loadBookmarks();
+    if (!list.length) {
+      const empty = document.createElement('div');
+      empty.textContent = 'noch keine — 🔖 drücken zum Merken';
+      empty.style.opacity = '0.6';
+      bookmarkListEl.appendChild(empty);
+      return;
+    }
+    for (let i = list.length - 1; i >= 0; i--) {
+      const bm = list[i];
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;align-items:center;gap:6px';
+      const link = document.createElement('span');
+      link.textContent = `${fmtTime(bm.time)} · ${bm.title.slice(0, 28)}`;
+      link.title = `${bm.title} — ${fmtTime(bm.time)}`;
+      link.style.cssText = 'cursor:pointer;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+      link.addEventListener('click', (e) => { e.stopPropagation(); jumpToBookmark(bm); });
+      const del = document.createElement('span');
+      del.textContent = '✕';
+      del.style.cssText = 'cursor:pointer;opacity:0.7';
+      del.title = 'Bookmark löschen';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const cur = loadBookmarks();
+        cur.splice(i, 1);
+        saveBookmarks(cur);
+        renderBookmarks();
+      });
+      row.appendChild(link);
+      row.appendChild(del);
+      bookmarkListEl.appendChild(row);
+    }
+  }
+
+  // Nach Navigation zu einem Bookmark: einmalig an die Stelle spulen
+  const JUMP_AT_LOAD = (() => {
+    try { return JSON.parse(localStorage.getItem(JUMP_KEY) || 'null'); } catch (e) { return null; }
+  })();
+  let jumpDone = false;
+
+  function restorePendingJump() {
+    if (jumpDone || !JUMP_AT_LOAD) return;
+    if (Date.now() - JUMP_AT_LOAD.at > 120000) { jumpDone = true; return; }
+    const video = mainVideo();
+    if (!video || video.readyState < 2 || !video.duration) return;
+    try {
+      if (new URL(JUMP_AT_LOAD.url).pathname !== location.pathname) { jumpDone = true; return; }
+    } catch (e) { jumpDone = true; return; }
+    jumpDone = true;
+    try { localStorage.removeItem(JUMP_KEY); } catch (e) { /* egal */ }
+    video.currentTime = Math.min(JUMP_AT_LOAD.time, video.duration - 1);
+    log(`Bookmark-Sprung zu ${fmtTime(JUMP_AT_LOAD.time)}`);
+    flashBadge(`🔖 ${fmtTime(JUMP_AT_LOAD.time)}`, 2500);
+  }
+
+  // ------------------------------------------------------------------
+  // Skip-Undo: nach einem Auto-Skip 10 s lang zurückspringen können
+  // ------------------------------------------------------------------
+  let undoInfo = null;
+
+  function undoSkip() {
+    if (!undoInfo) return;
+    const video = mainVideo();
+    if (video) {
+      video.currentTime = undoInfo.time;
+      log(`Skip rückgängig — zurück zu ${fmtTime(undoInfo.time)}`);
+    }
+    undoInfo = null;
   }
 
   // ------------------------------------------------------------------
@@ -718,7 +951,10 @@
       const fromUrl = lastHref;
       lastHref = location.href;
       skipEvents = null;
+      skippedOnce.clear();
+      undoInfo = null;
       log(`Navigation: ${fromUrl} → ${location.href}`);
+      if (isWatchUrl(fromUrl)) pushEpisodeHistory(fromUrl);
       handleNavigation(fromUrl);
     }
     buildUi();
@@ -754,6 +990,7 @@
       }
       restoreResumePoint();
     }
+    restorePendingJump();
     updateBadgeVisibility();
   }, SCAN_INTERVAL_MS);
 })();
